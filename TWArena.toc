@@ -1,0 +1,10 @@
+## Interface: 11200
+## Title: TWArena
+## Notes: Arena Team Management System for TW
+## Version: 1.0.0
+## Author: Kittnz
+## SavedVariables: TWArenaDB
+## Dependencies: 
+## OptionalDeps: 
+
+TWArena.lua

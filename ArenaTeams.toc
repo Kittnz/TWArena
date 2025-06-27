@@ -1,8 +1,0 @@
-## Interface: 11200
-## Title: Arena Teams
-## Notes: Arena Team Management System for Turtle WoW
-## Author: Kittnz
-## Version: 1.0
-## SavedVariables: ArenaTeamsDB
-
-ArenaTeams.lua
