@@ -585,10 +585,9 @@ function TWArena:OnEvent()
     if event == "ADDON_LOADED" and arg1 == "TWArena" then
         TWArena:Print("TWArena v" .. TWArena.VERSION .. " loaded. Type /arena help for commands.");
     elseif event == "CHAT_MSG_ADDON" then
-        -- Debug: Print all addon messages to see what we're receiving
-        TWArena:Print("DEBUG: Received addon message - Prefix: '" .. tostring(arg1) .. "' Message: '" .. tostring(arg2) .. "' Channel: '" .. tostring(arg4) .. "'");
-        
         if arg1 == TWArena.ADDON_PREFIX then
+			-- Debug: Print all addon messages to see what we're receiving
+			TWArena:Print("DEBUG: Received addon message - Prefix: '" .. tostring(arg1) .. "' Message: '" .. tostring(arg2) .. "' Channel: '" .. tostring(arg4) .. "'");
             TWArena:HandleServerMessage(arg2);
         end
     elseif event == "PLAYER_ENTERING_WORLD" then
