@@ -3,7 +3,7 @@
 
 -- Addon variables
 TWArena = {};
-TWArena.VERSION = "1.0.0";
+TWArena.VERSION = "1.0.1";
 TWArena.ADDON_PREFIX = "TW_ARENA";
 TWArena.ADDON_CHANNEL = "GUILD";
 
@@ -16,19 +16,21 @@ TWArena.ARENA_TYPES = {
 
 -- Message types from server
 TWArena.MSG_TYPES = {
-    INFO = "INFO",
-    STATS = "STATS", 
-    ROSTER = "ROSTER",
-    TOP = "TOP",
-    CREATE_SUCCESS = "CREATE_SUCCESS",
-    INVITE_SUCCESS = "INVITE_SUCCESS",
-    INVITED = "INVITED",
-    KICK_SUCCESS = "KICK_SUCCESS",
-    KICKED = "KICKED",
-    DISBAND_SUCCESS = "DISBAND_SUCCESS",
-    QUEUE_SUCCESS = "QUEUE_SUCCESS",
-    LEAVE_QUEUE_SUCCESS = "LEAVE_QUEUE_SUCCESS",
-    ERROR = "ERROR"
+    INFO = "S2C_INFO",
+    STATS = "S2C_STATS", 
+    ROSTER = "S2C_ROSTER",
+    TOP = "S2C_TOP",
+    CREATE_SUCCESS = "S2C_CREATE_SUCCESS",
+    INVITE_SUCCESS = "S2C_INVITE_SUCCESS",
+    INVITED = "S2C_INVITED",
+    INVITE_ACCEPTED = "S2C_INVITE_ACCEPTED",
+    INVITE_DECLINED = "S2C_INVITE_DECLINED",
+    KICK_SUCCESS = "S2C_KICK_SUCCESS",
+    KICKED = "S2C_KICKED",
+    DISBAND_SUCCESS = "S2C_DISBAND_SUCCESS",
+    QUEUE_SUCCESS = "S2C_QUEUE_SUCCESS",
+    LEAVE_QUEUE_SUCCESS = "S2C_LEAVE_QUEUE_SUCCESS",
+    ERROR = "S2C_ERROR"
 };
 
 -- Field delimiters (matching server protocol)
@@ -39,6 +41,7 @@ TWArena.SUBFIELD_DELIMITER = "|";
 -- Data storage
 TWArena.TeamData = {};
 TWArena.QueueStatus = {};
+TWArena.PendingInvites = {}; -- Store pending invitations
 
 -- UI Frame references
 TWArena.Frames = {};
@@ -50,6 +53,10 @@ end
 
 function TWArena:PrintError(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cffff0000[TWArena Error]|r " .. msg);
+end
+
+function TWArena:PrintSuccess(msg)
+    DEFAULT_CHAT_FRAME:AddMessage("|cff00ffff[TWArena]|r " .. msg);
 end
 
 function TWArena:SendAddonMessage(command, arg1, arg2, arg3, arg4, arg5)
@@ -95,6 +102,57 @@ function TWArena:SplitString(str, delimiter)
     return result;
 end
 
+-- Invitation System Functions
+function TWArena:AcceptInvite(teamId, arenaType)
+    if not teamId or not arenaType then
+        TWArena:PrintError("Invalid invitation data");
+        return;
+    end
+    
+    TWArena:SendAddonMessage("C2S_ACCEPT_INVITE", teamId, arenaType);
+    TWArena:Print("Accepting invitation...");
+end
+
+function TWArena:DeclineInvite(teamId, arenaType)
+    if not teamId or not arenaType then
+        TWArena:PrintError("Invalid invitation data");
+        return;
+    end
+    
+    TWArena:SendAddonMessage("C2S_DECLINE_INVITE", teamId, arenaType);
+    TWArena:Print("Declining invitation...");
+end
+
+function TWArena:StorePendingInvite(teamName, arenaType, inviterName, teamId)
+    local invite = {
+        teamName = teamName,
+        arenaType = arenaType,
+        inviterName = inviterName,
+        teamId = teamId,
+        timestamp = GetTime()
+    };
+    
+    TWArena.PendingInvites[arenaType] = invite;
+    TWArena:Print("Stored pending invite for " .. arenaType .. " team: " .. teamName);
+end
+
+function TWArena:GetPendingInvite(arenaType)
+    local invite = TWArena.PendingInvites[arenaType];
+    if invite then
+        -- Check if invite has expired (5 minutes)
+        if GetTime() - invite.timestamp > 300 then
+            TWArena.PendingInvites[arenaType] = nil;
+            return nil;
+        end
+        return invite;
+    end
+    return nil;
+end
+
+function TWArena:ClearPendingInvite(arenaType)
+    TWArena.PendingInvites[arenaType] = nil;
+end
+
 -- Message Handlers
 function TWArena:HandleServerMessage(msg)
     TWArena:Print("Received: " .. msg);
@@ -120,6 +178,10 @@ function TWArena:HandleServerMessage(msg)
         TWArena:HandleInviteSuccessMessage(fields);
     elseif msgType == TWArena.MSG_TYPES.INVITED then
         TWArena:HandleInvitedMessage(fields);
+    elseif msgType == TWArena.MSG_TYPES.INVITE_ACCEPTED then
+        TWArena:HandleInviteAcceptedMessage(fields);
+    elseif msgType == TWArena.MSG_TYPES.INVITE_DECLINED then
+        TWArena:HandleInviteDeclinedMessage(fields);
     elseif msgType == TWArena.MSG_TYPES.KICK_SUCCESS then
         TWArena:HandleKickSuccessMessage(fields);
     elseif msgType == TWArena.MSG_TYPES.KICKED then
@@ -156,7 +218,7 @@ function TWArena:HandleInfoMessage(fields)
         return;
     end
     
-    -- Parse team data: type:name:role:rating:rank|type:name:role:rating:rank|...
+    -- Parse team data: type:name:role:rating:rank:seasonWins:seasonGames:weekWins:weekGames|...
     local teams = TWArena:SplitString(teamData, TWArena.SUBFIELD_DELIMITER);
     
     TWArena:Print("DEBUG: Split into " .. table.getn(teams) .. " teams");
@@ -165,12 +227,16 @@ function TWArena:HandleInfoMessage(fields)
         local teamInfo = TWArena:SplitString(teams[i], TWArena.ARRAY_DELIMITER);
         TWArena:Print("DEBUG: Team " .. i .. " has " .. table.getn(teamInfo) .. " parts: " .. teams[i]);
         
-        if table.getn(teamInfo) >= 5 then
+        if table.getn(teamInfo) >= 9 then
             local arenaTypeNum = teamInfo[1];
             local teamName = teamInfo[2];
             local role = teamInfo[3];
             local rating = tonumber(teamInfo[4]) or 0;
             local rank = tonumber(teamInfo[5]) or 0;
+            local seasonWins = tonumber(teamInfo[6]) or 0;
+            local seasonGames = tonumber(teamInfo[7]) or 0;
+            local weekWins = tonumber(teamInfo[8]) or 0;
+            local weekGames = tonumber(teamInfo[9]) or 0;
             
             -- Convert numeric arena type to readable format
             local arenaType;
@@ -191,7 +257,11 @@ function TWArena:HandleInfoMessage(fields)
                     name = teamName,
                     role = role,
                     rating = rating,
-                    rank = rank
+                    rank = rank,
+                    seasonWins = seasonWins,
+                    seasonGames = seasonGames,
+                    weekWins = weekWins,
+                    weekGames = weekGames
                 };
                 TWArena:Print("Added team: " .. arenaType .. " - " .. teamName .. " (Rating: " .. rating .. ")");
             else
@@ -243,16 +313,19 @@ function TWArena:HandleRosterMessage(fields)
         return;
     end
     
-    -- Parse roster data: name:class:role|name:class:role|...
+    -- Parse roster data: name:role:personalRating:seasonGames:seasonWins|...
     local members = TWArena:SplitString(rosterData, TWArena.SUBFIELD_DELIMITER);
     
     for i = 1, table.getn(members) do
         local memberInfo = TWArena:SplitString(members[i], TWArena.ARRAY_DELIMITER);
-        if table.getn(memberInfo) >= 3 then
+        if table.getn(memberInfo) >= 5 then
             local name = memberInfo[1];
-            local class = memberInfo[2];
-            local role = memberInfo[3];
-            TWArena:Print(string.format("%s (%s) - %s", name, class, role));
+            local role = memberInfo[2];
+            local personalRating = tonumber(memberInfo[3]) or 0;
+            local seasonGames = tonumber(memberInfo[4]) or 0;
+            local seasonWins = tonumber(memberInfo[5]) or 0;
+            TWArena:Print(string.format("%s (%s) - Rating: %d, Record: %d/%d", 
+                name, role, personalRating, seasonWins, seasonGames));
         end
     end
 end
@@ -265,7 +338,7 @@ function TWArena:HandleTopMessage(fields)
     local arenaType = fields[2];
     local topData = fields[3];
     
-    if arenaType == "" then
+    if arenaType == "ALL" then
         TWArena:Print("=== Top Arena Teams (All Types) ===");
     else
         TWArena:Print("=== Top " .. arenaType .. " Teams ===");
@@ -276,20 +349,21 @@ function TWArena:HandleTopMessage(fields)
         return;
     end
     
-    -- Parse top teams data: rank:name:type:rating:wins:games|...
+    -- Parse top teams data: rank:name:type:rating:rank:wins:games|...
     local teams = TWArena:SplitString(topData, TWArena.SUBFIELD_DELIMITER);
     
     for i = 1, table.getn(teams) do
         local teamInfo = TWArena:SplitString(teams[i], TWArena.ARRAY_DELIMITER);
-        if table.getn(teamInfo) >= 6 then
+        if table.getn(teamInfo) >= 7 then
             local rank = teamInfo[1];
             local name = teamInfo[2];
             local teamType = teamInfo[3];
             local rating = tonumber(teamInfo[4]) or 0;
-            local wins = tonumber(teamInfo[5]) or 0;
-            local games = tonumber(teamInfo[6]) or 0;
-            TWArena:Print(string.format("%s. %s (%s) - Rating: %d, Record: %d/%d", 
-                rank, name, teamType, rating, wins, games));
+            local teamRank = tonumber(teamInfo[5]) or 0;
+            local wins = tonumber(teamInfo[6]) or 0;
+            local games = tonumber(teamInfo[7]) or 0;
+            TWArena:Print(string.format("%s. %s (%s) - Rating: %d (Rank: %d), Record: %d/%d", 
+                rank, name, teamType, rating, teamRank, wins, games));
         end
     end
 end
@@ -298,7 +372,7 @@ function TWArena:HandleCreateSuccessMessage(fields)
     if table.getn(fields) >= 3 then
         local arenaType = fields[2];
         local teamName = fields[3];
-        TWArena:Print("Successfully created " .. arenaType .. " team: " .. teamName);
+        TWArena:PrintSuccess("Successfully created " .. arenaType .. " team: " .. teamName);
         TWArena:RequestTeamInfo();
     end
 end
@@ -308,17 +382,79 @@ function TWArena:HandleInviteSuccessMessage(fields)
         local playerName = fields[2];
         local arenaType = fields[3];
         local teamName = fields[4];
-        TWArena:Print("Successfully invited " .. playerName .. " to " .. arenaType .. " team: " .. teamName);
+        TWArena:PrintSuccess("Successfully invited " .. playerName .. " to " .. arenaType .. " team: " .. teamName);
     end
 end
 
 function TWArena:HandleInvitedMessage(fields)
-    if table.getn(fields) >= 4 then
+    if table.getn(fields) >= 5 then
         local teamName = fields[2];
         local arenaType = fields[3];
         local inviterName = fields[4];
+        local teamId = fields[5];
+        
+        -- Store the invitation
+        TWArena:StorePendingInvite(teamName, arenaType, inviterName, teamId);
+        
+        -- Show invitation dialog
+        TWArena:ShowInvitationDialog(teamName, arenaType, inviterName, teamId);
+        
         TWArena:Print("You have been invited to " .. arenaType .. " team '" .. teamName .. "' by " .. inviterName);
+    end
+end
+
+function TWArena:HandleInviteAcceptedMessage(fields)
+    if table.getn(fields) >= 4 then
+        local arg1 = fields[2]; -- teamName (for invitee) or playerName (for inviter)
+        local arg2 = fields[3]; -- arenaType (for invitee) or teamName (for inviter)
+        local arg3 = fields[4]; -- inviterName (for invitee) or arenaType (for inviter)
+        
+        -- Determine if we're the invitee or inviter based on context
+        -- If arg2 is a number, we're the invitee
+        local arenaTypeNum = tonumber(arg2);
+        if arenaTypeNum then
+            -- We accepted an invitation
+            local teamName = arg1;
+            local arenaType = arg2 .. "v" .. arg2;
+            local inviterName = arg3;
+            TWArena:PrintSuccess("You have successfully joined " .. arenaType .. " team '" .. teamName .. "'!");
+            TWArena:ClearPendingInvite(arenaType);
+        else
+            -- Someone accepted our invitation
+            local playerName = arg1;
+            local teamName = arg2;
+            local arenaTypeNum = tonumber(arg3);
+            local arenaType = arg3 .. "v" .. arg3;
+            TWArena:PrintSuccess(playerName .. " has joined your " .. arenaType .. " team '" .. teamName .. "'!");
+        end
+        
         TWArena:RequestTeamInfo();
+    end
+end
+
+function TWArena:HandleInviteDeclinedMessage(fields)
+    if table.getn(fields) >= 4 then
+        local arg1 = fields[2]; -- teamName (for invitee) or playerName (for inviter)
+        local arg2 = fields[3]; -- arenaType (for invitee) or teamName (for inviter)
+        local arg3 = fields[4]; -- inviterName (for invitee) or arenaType (for inviter)
+        
+        -- Determine if we're the invitee or inviter based on context
+        local arenaTypeNum = tonumber(arg2);
+        if arenaTypeNum then
+            -- We declined an invitation
+            local teamName = arg1;
+            local arenaType = arg2 .. "v" .. arg2;
+            local inviterName = arg3;
+            TWArena:Print("You have declined the invitation to " .. arenaType .. " team '" .. teamName .. "'");
+            TWArena:ClearPendingInvite(arenaType);
+        else
+            -- Someone declined our invitation
+            local playerName = arg1;
+            local teamName = arg2;
+            local arenaTypeNum = tonumber(arg3);
+            local arenaType = arg3 .. "v" .. arg3;
+            TWArena:Print(playerName .. " has declined your invitation to " .. arenaType .. " team '" .. teamName .. "'");
+        end
     end
 end
 
@@ -327,7 +463,7 @@ function TWArena:HandleKickSuccessMessage(fields)
         local playerName = fields[2];
         local arenaType = fields[3];
         local teamName = fields[4];
-        TWArena:Print("Successfully kicked " .. playerName .. " from " .. arenaType .. " team: " .. teamName);
+        TWArena:PrintSuccess("Successfully kicked " .. playerName .. " from " .. arenaType .. " team: " .. teamName);
     end
 end
 
@@ -345,7 +481,7 @@ function TWArena:HandleDisbandSuccessMessage(fields)
     if table.getn(fields) >= 3 then
         local arenaType = fields[2];
         local teamName = fields[3];
-        TWArena:Print("Successfully disbanded " .. arenaType .. " team: " .. teamName);
+        TWArena:PrintSuccess("Successfully disbanded " .. arenaType .. " team: " .. teamName);
         TWArena:RequestTeamInfo();
     end
 end
@@ -354,13 +490,13 @@ function TWArena:HandleQueueSuccessMessage(fields)
     if table.getn(fields) >= 3 then
         local arenaType = fields[2];
         local avgTime = tonumber(fields[3]) or 0;
-        TWArena:Print("Successfully joined " .. arenaType .. " arena queue. Average wait time: " .. avgTime .. "ms");
+        TWArena:PrintSuccess("Successfully joined " .. arenaType .. " arena queue. Average wait time: " .. avgTime .. "ms");
         TWArena.QueueStatus[arenaType] = true;
     end
 end
 
 function TWArena:HandleLeaveQueueSuccessMessage(fields)
-    TWArena:Print("Successfully left arena queue.");
+    TWArena:PrintSuccess("Successfully left arena queue.");
     TWArena.QueueStatus = {};
 end
 
@@ -373,7 +509,7 @@ end
 -- API Functions
 function TWArena:RequestTeamInfo()
     TWArena:Print("DEBUG: Requesting team info...");
-    TWArena:SendAddonMessage("INFO");
+    TWArena:SendAddonMessage("S2C_INFO");
 end
 
 function TWArena:RequestTeamStats(arenaType)
@@ -381,7 +517,7 @@ function TWArena:RequestTeamStats(arenaType)
         TWArena:PrintError("Invalid arena type: " .. arenaType);
         return;
     end
-    TWArena:SendAddonMessage("STATS", arenaType);
+    TWArena:SendAddonMessage("S2C_STATS", arenaType);
 end
 
 function TWArena:RequestTeamRoster(arenaType)
@@ -389,7 +525,7 @@ function TWArena:RequestTeamRoster(arenaType)
         TWArena:PrintError("Invalid arena type: " .. arenaType);
         return;
     end
-    TWArena:SendAddonMessage("ROSTER", arenaType);
+    TWArena:SendAddonMessage("S2C_ROSTER", arenaType);
 end
 
 function TWArena:RequestTopTeams(arenaType)
@@ -397,7 +533,7 @@ function TWArena:RequestTopTeams(arenaType)
         TWArena:PrintError("Invalid arena type: " .. arenaType);
         return;
     end
-    TWArena:SendAddonMessage("TOP", arenaType or "");
+    TWArena:SendAddonMessage("S2C_TOP", arenaType or "");
 end
 
 function TWArena:CreateTeam(arenaType, teamName)
@@ -409,7 +545,7 @@ function TWArena:CreateTeam(arenaType, teamName)
         TWArena:PrintError("Team name must be between 2 and 24 characters");
         return;
     end
-    TWArena:SendAddonMessage("CREATE", arenaType, teamName);
+    TWArena:SendAddonMessage("S2C_CREATE", arenaType, teamName);
 end
 
 function TWArena:InvitePlayer(playerName, arenaType)
@@ -421,7 +557,7 @@ function TWArena:InvitePlayer(playerName, arenaType)
         TWArena:PrintError("Player name cannot be empty");
         return;
     end
-    TWArena:SendAddonMessage("INVITE", playerName, arenaType);
+    TWArena:SendAddonMessage("S2C_INVITE", playerName, arenaType);
 end
 
 function TWArena:KickPlayer(playerName, arenaType)
@@ -433,7 +569,7 @@ function TWArena:KickPlayer(playerName, arenaType)
         TWArena:PrintError("Player name cannot be empty");
         return;
     end
-    TWArena:SendAddonMessage("KICK", playerName, arenaType);
+    TWArena:SendAddonMessage("S2C_KICK", playerName, arenaType);
 end
 
 function TWArena:DisbandTeam(arenaType)
@@ -441,7 +577,7 @@ function TWArena:DisbandTeam(arenaType)
         TWArena:PrintError("Invalid arena type: " .. arenaType);
         return;
     end
-    TWArena:SendAddonMessage("DISBAND", arenaType);
+    TWArena:SendAddonMessage("S2C_DISBAND", arenaType);
 end
 
 function TWArena:JoinQueue(arenaType)
@@ -449,11 +585,11 @@ function TWArena:JoinQueue(arenaType)
         TWArena:PrintError("Invalid arena type: " .. arenaType);
         return;
     end
-    TWArena:SendAddonMessage("QUEUE", arenaType);
+    TWArena:SendAddonMessage("S2C_QUEUE", arenaType);
 end
 
 function TWArena:LeaveQueue()
-    TWArena:SendAddonMessage("LEAVE_QUEUE");
+    TWArena:SendAddonMessage("S2C_LEAVE_QUEUE");
 end
 
 -- UI Functions
@@ -513,6 +649,82 @@ function TWArena:CreateMainFrame()
     TWArena:Print("DEBUG: Main frame created");
 end
 
+function TWArena:ShowInvitationDialog(teamName, arenaType, inviterName, teamId)
+    -- Close existing invitation dialog if any
+    if TWArena.Frames.InviteDialog then
+        TWArena.Frames.InviteDialog:Hide();
+        TWArena.Frames.InviteDialog = nil;
+    end
+    
+    local frame = CreateFrame("Frame", "TWArenaInviteDialog", UIParent);
+    frame:SetFrameStrata("FULLSCREEN_DIALOG");
+    frame:SetWidth(350);
+    frame:SetHeight(150);
+    frame:SetPoint("CENTER", UIParent, "CENTER", 0, 100);
+    frame:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true, tileSize = 32, edgeSize = 32,
+        insets = { left = 11, right = 12, top = 12, bottom = 11 }
+    });
+    frame:SetMovable(true);
+    frame:EnableMouse(true);
+    
+    -- Title
+    local title = frame:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge");
+    title:SetPoint("TOP", frame, "TOP", 0, -15);
+    title:SetText("Arena Team Invitation");
+    title:SetTextColor(1, 1, 0); -- Yellow
+    
+    -- Invitation text
+    local inviteText = frame:CreateFontString(nil, "ARTWORK", "GameFontNormal");
+    inviteText:SetPoint("TOP", title, "BOTTOM", 0, -10);
+    inviteText:SetWidth(300);
+    inviteText:SetText(inviterName .. " has invited you to join\\n" .. arenaType .. " team: " .. teamName);
+    inviteText:SetJustifyH("CENTER");
+    
+    -- Accept button
+    local acceptBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate");
+    acceptBtn:SetWidth(80);
+    acceptBtn:SetHeight(25);
+    acceptBtn:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 30, 15);
+    acceptBtn:SetText("Accept");
+    acceptBtn:SetScript("OnClick", function() 
+        TWArena:AcceptInvite(teamId, TWArena.ARENA_TYPES[arenaType]);
+        frame:Hide();
+        TWArena.Frames.InviteDialog = nil;
+    end);
+    
+    -- Decline button
+    local declineBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate");
+    declineBtn:SetWidth(80);
+    declineBtn:SetHeight(25);
+    declineBtn:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -30, 15);
+    declineBtn:SetText("Decline");
+    declineBtn:SetScript("OnClick", function() 
+        TWArena:DeclineInvite(teamId, TWArena.ARENA_TYPES[arenaType]);
+        frame:Hide();
+        TWArena.Frames.InviteDialog = nil;
+    end);
+    
+    -- Auto-close after 5 minutes
+    local startTime = GetTime();
+    frame:SetScript("OnUpdate", function()
+        if GetTime() - startTime > 300 then -- 5 minutes
+            TWArena:Print("Arena invitation has expired.");
+            frame:Hide();
+            TWArena.Frames.InviteDialog = nil;
+            TWArena:ClearPendingInvite(arenaType);
+        end
+    end);
+    
+    frame:Show();
+    TWArena.Frames.InviteDialog = frame;
+    
+    -- Play sound notification
+    PlaySound("TellMessage");
+end
+
 function TWArena:UpdateMainFrame()
     TWArena:Print("DEBUG: UpdateMainFrame called");
     
@@ -561,6 +773,11 @@ function TWArena:UpdateMainFrame()
         local teamDetails = content:CreateFontString(nil, "ARTWORK", "GameFontNormal");
         teamDetails:SetPoint("TOPLEFT", content, "TOPLEFT", 15, yOffset);
         teamDetails:SetText("Role: " .. teamInfo.role .. " | Rating: " .. teamInfo.rating .. " | Rank: " .. teamInfo.rank);
+        yOffset = yOffset - 15;
+        
+        local teamStats = content:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall");
+        teamStats:SetPoint("TOPLEFT", content, "TOPLEFT", 15, yOffset);
+        teamStats:SetText("Season: " .. teamInfo.seasonWins .. "/" .. teamInfo.seasonGames .. " | Week: " .. teamInfo.weekWins .. "/" .. teamInfo.weekGames);
         yOffset = yOffset - 25;
         
         TWArena:Print("DEBUG: Added UI elements for " .. arenaType);
@@ -586,8 +803,8 @@ function TWArena:OnEvent()
         TWArena:Print("TWArena v" .. TWArena.VERSION .. " loaded. Type /arena help for commands.");
     elseif event == "CHAT_MSG_ADDON" then
         if arg1 == TWArena.ADDON_PREFIX then
-			-- Debug: Print all addon messages to see what we're receiving
-			TWArena:Print("DEBUG: Received addon message - Prefix: '" .. tostring(arg1) .. "' Message: '" .. tostring(arg2) .. "' Channel: '" .. tostring(arg4) .. "'");
+            -- Debug: Print all addon messages to see what we're receiving
+            TWArena:Print("DEBUG: Received addon message - Prefix: '" .. tostring(arg1) .. "' Message: '" .. tostring(arg2) .. "' Channel: '" .. tostring(arg4) .. "'");
             TWArena:HandleServerMessage(arg2);
         end
     elseif event == "PLAYER_ENTERING_WORLD" then
@@ -676,6 +893,30 @@ SlashCmdList["ARENA"] = function(msg)
         end
     elseif command == "leave" then
         TWArena:LeaveQueue();
+    elseif command == "accept" then
+        local arenaType = args[2];
+        if arenaType then
+            local invite = TWArena:GetPendingInvite(arenaType);
+            if invite then
+                TWArena:AcceptInvite(invite.teamId, TWArena.ARENA_TYPES[arenaType]);
+            else
+                TWArena:PrintError("No pending " .. arenaType .. " invitation found.");
+            end
+        else
+            TWArena:PrintError("Usage: /arena accept <2v2|3v3|5v5>");
+        end
+    elseif command == "decline" then
+        local arenaType = args[2];
+        if arenaType then
+            local invite = TWArena:GetPendingInvite(arenaType);
+            if invite then
+                TWArena:DeclineInvite(invite.teamId, TWArena.ARENA_TYPES[arenaType]);
+            else
+                TWArena:PrintError("No pending " .. arenaType .. " invitation found.");
+            end
+        else
+            TWArena:PrintError("Usage: /arena decline <2v2|3v3|5v5>");
+        end
     elseif command == "help" then
         TWArena:Print("=== TWArena Commands ===");
         TWArena:Print("/arena show - Show/hide arena window");
@@ -685,6 +926,8 @@ SlashCmdList["ARENA"] = function(msg)
         TWArena:Print("/arena top [type] - Show top teams");
         TWArena:Print("/arena create <type> <name> - Create a team");
         TWArena:Print("/arena invite <player> <type> - Invite player");
+        TWArena:Print("/arena accept <type> - Accept invitation");
+        TWArena:Print("/arena decline <type> - Decline invitation");
         TWArena:Print("/arena kick <player> <type> - Kick player");
         TWArena:Print("/arena disband <type> - Disband team");
         TWArena:Print("/arena queue <type> - Join arena queue");
@@ -707,9 +950,34 @@ SlashCmdList["ARENADATA"] = function()
     if count == 0 then
         TWArena:Print("No team data stored!");
     end
+    
+    TWArena:Print("=== Pending Invitations ===");
+    local inviteCount = 0;
+    for arenaType, invite in pairs(TWArena.PendingInvites) do
+        inviteCount = inviteCount + 1;
+        TWArena:Print(arenaType .. ": " .. invite.teamName .. " (from " .. invite.inviterName .. ", ID: " .. invite.teamId .. ")");
+    end
+    if inviteCount == 0 then
+        TWArena:Print("No pending invitations!");
+    end
 end
 
 SLASH_ARENAUPDATE1 = "/arenaupdate";
 SlashCmdList["ARENAUPDATE"] = function()
     TWArena:UpdateMainFrame();
+end
+
+SLASH_ARENAINVITE1 = "/arenainvite";
+SlashCmdList["ARENAINVITE"] = function(msg)
+    -- Debug command to simulate receiving an invitation
+    local args = TWArena:SplitString(msg, " ");
+    if table.getn(args) >= 4 then
+        local teamName = args[1];
+        local arenaType = args[2];
+        local inviterName = args[3];
+        local teamId = args[4];
+        TWArena:ShowInvitationDialog(teamName, arenaType, inviterName, teamId);
+    else
+        TWArena:Print("Usage: /arenainvite <teamName> <arenaType> <inviterName> <teamId>");
+    end
 end
