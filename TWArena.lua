@@ -3,7 +3,7 @@
 
 -- Addon variables
 TWArena = {};
-TWArena.VERSION = "1.0.1";
+TWArena.VERSION = "1.0.2";
 TWArena.ADDON_PREFIX = "TW_ARENA";
 TWArena.ADDON_CHANNEL = "GUILD";
 
@@ -30,6 +30,8 @@ TWArena.MSG_TYPES = {
     DISBAND_SUCCESS = "S2C_DISBAND_SUCCESS",
     QUEUE_SUCCESS = "S2C_QUEUE_SUCCESS",
     LEAVE_QUEUE_SUCCESS = "S2C_LEAVE_QUEUE_SUCCESS",
+    LEAVE_TEAM_SUCCESS = "S2C_LEAVE_TEAM_SUCCESS",
+    MEMBER_LEFT = "S2C_MEMBER_LEFT",
     ERROR = "S2C_ERROR"
 };
 
@@ -192,6 +194,10 @@ function TWArena:HandleServerMessage(msg)
         TWArena:HandleQueueSuccessMessage(fields);
     elseif msgType == TWArena.MSG_TYPES.LEAVE_QUEUE_SUCCESS then
         TWArena:HandleLeaveQueueSuccessMessage(fields);
+    elseif msgType == TWArena.MSG_TYPES.LEAVE_TEAM_SUCCESS then
+        TWArena:HandleLeaveTeamSuccessMessage(fields);
+    elseif msgType == TWArena.MSG_TYPES.MEMBER_LEFT then
+        TWArena:HandleMemberLeftMessage(fields);
     elseif msgType == TWArena.MSG_TYPES.ERROR then
         TWArena:HandleErrorMessage(fields);
     else
@@ -500,6 +506,25 @@ function TWArena:HandleLeaveQueueSuccessMessage(fields)
     TWArena.QueueStatus = {};
 end
 
+function TWArena:HandleLeaveTeamSuccessMessage(fields)
+    if table.getn(fields) >= 3 then
+        local arenaType = fields[2];
+        local teamName = fields[3];
+        TWArena:PrintSuccess("You have successfully left " .. arenaType .. " team: " .. teamName);
+        TWArena:RequestTeamInfo();
+    end
+end
+
+function TWArena:HandleMemberLeftMessage(fields)
+    if table.getn(fields) >= 4 then
+        local playerName = fields[2];
+        local arenaType = fields[3];
+        local teamName = fields[4];
+        TWArena:Print(playerName .. " has left your " .. arenaType .. " team '" .. teamName .. "'");
+        TWArena:RequestTeamInfo();
+    end
+end
+
 function TWArena:HandleErrorMessage(fields)
     if table.getn(fields) >= 2 then
         TWArena:PrintError(fields[2]);
@@ -578,6 +603,14 @@ function TWArena:DisbandTeam(arenaType)
         return;
     end
     TWArena:SendAddonMessage("S2C_DISBAND", arenaType);
+end
+
+function TWArena:LeaveTeam(arenaType)
+    if not TWArena.ARENA_TYPES[arenaType] then
+        TWArena:PrintError("Invalid arena type: " .. arenaType);
+        return;
+    end
+    TWArena:SendAddonMessage("S2C_LEAVE_TEAM", arenaType);
 end
 
 function TWArena:JoinQueue(arenaType)
@@ -884,6 +917,13 @@ SlashCmdList["ARENA"] = function(msg)
         else
             TWArena:PrintError("Usage: /arena disband <2v2|3v3|5v5>");
         end
+    elseif command == "leave" then
+        local arenaType = args[2];
+        if arenaType then
+            TWArena:LeaveTeam(arenaType);
+        else
+            TWArena:PrintError("Usage: /arena leave <2v2|3v3|5v5>");
+        end
     elseif command == "queue" then
         local arenaType = args[2];
         if arenaType then
@@ -891,7 +931,7 @@ SlashCmdList["ARENA"] = function(msg)
         else
             TWArena:PrintError("Usage: /arena queue <2v2|3v3|5v5>");
         end
-    elseif command == "leave" then
+    elseif command == "leavequeue" or command == "leaveq" then
         TWArena:LeaveQueue();
     elseif command == "accept" then
         local arenaType = args[2];
@@ -930,8 +970,9 @@ SlashCmdList["ARENA"] = function(msg)
         TWArena:Print("/arena decline <type> - Decline invitation");
         TWArena:Print("/arena kick <player> <type> - Kick player");
         TWArena:Print("/arena disband <type> - Disband team");
+        TWArena:Print("/arena leave <type> - Leave team");
         TWArena:Print("/arena queue <type> - Join arena queue");
-        TWArena:Print("/arena leave - Leave arena queue");
+        TWArena:Print("/arena leavequeue - Leave arena queue");
         TWArena:Print("Arena types: 2v2, 3v3, 5v5");
     else
         TWArena:PrintError("Unknown command. Type /arena help for help.");
