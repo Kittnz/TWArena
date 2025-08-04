@@ -3,7 +3,7 @@
 
 -- Addon variables
 TWArena = {};
-TWArena.VERSION = "1.0.2";
+TWArena.VERSION = "1.0.3";
 TWArena.ADDON_PREFIX = "TW_ARENA";
 TWArena.ADDON_CHANNEL = "GUILD";
 
@@ -32,6 +32,7 @@ TWArena.MSG_TYPES = {
     LEAVE_QUEUE_SUCCESS = "S2C_LEAVE_QUEUE_SUCCESS",
     LEAVE_TEAM_SUCCESS = "S2C_LEAVE_TEAM_SUCCESS",
     MEMBER_LEFT = "S2C_MEMBER_LEFT",
+    SCOREBOARD = "S2C_SCOREBOARD",
     ERROR = "S2C_ERROR"
 };
 
@@ -44,6 +45,7 @@ TWArena.SUBFIELD_DELIMITER = "|";
 TWArena.TeamData = {};
 TWArena.QueueStatus = {};
 TWArena.PendingInvites = {}; -- Store pending invitations
+TWArena.ScoreboardData = {}; -- Store latest scoreboard data
 
 -- UI Frame references
 TWArena.Frames = {};
@@ -59,6 +61,10 @@ end
 
 function TWArena:PrintSuccess(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cff00ffff[TWArena]|r " .. msg);
+end
+
+function TWArena:PrintDebug(msg)
+    DEFAULT_CHAT_FRAME:AddMessage("|cffFFA500[TWArena Debug]|r " .. msg);
 end
 
 function TWArena:SendAddonMessage(command, arg1, arg2, arg3, arg4, arg5)
@@ -102,6 +108,17 @@ function TWArena:SplitString(str, delimiter)
     
     table.insert(result, string.sub(str, start));
     return result;
+end
+
+-- Scoreboard Functions
+function TWArena:RequestScoreboard()
+    TWArena:Print("Requesting arena scoreboard...");
+    TWArena:SendAddonMessage("C2S_SCOREBOARD");
+end
+
+function TWArena:LeaveArenaMatch()
+    TWArena:Print("Attempting to leave arena match...");
+    TWArena:SendAddonMessage("C2S_LEAVE_MATCH");
 end
 
 -- Invitation System Functions
@@ -198,10 +215,118 @@ function TWArena:HandleServerMessage(msg)
         TWArena:HandleLeaveTeamSuccessMessage(fields);
     elseif msgType == TWArena.MSG_TYPES.MEMBER_LEFT then
         TWArena:HandleMemberLeftMessage(fields);
+    elseif msgType == TWArena.MSG_TYPES.SCOREBOARD then
+        TWArena:HandleScoreboardMessage(fields);
     elseif msgType == TWArena.MSG_TYPES.ERROR then
         TWArena:HandleErrorMessage(fields);
     else
         TWArena:PrintError("Unknown message type: " .. msgType);
+    end
+end
+
+function TWArena:HandleScoreboardMessage(fields)
+    TWArena:PrintDebug("HandleScoreboardMessage called with " .. table.getn(fields) .. " fields");
+    
+    if table.getn(fields) < 3 then
+        TWArena:PrintError("Invalid scoreboard message format - not enough fields");
+        return;
+    end
+    
+    -- Parse simplified scoreboard data: S2C_SCOREBOARD;winner;playerCount;playerData
+    -- New format: winner;playerCount;playerName|bgTeam:playerName|bgTeam:...
+    local winner = tonumber(fields[2]) or 0;
+    local playerCount = tonumber(fields[3]) or 0;
+    local playerData = fields[4] or "";
+    
+    TWArena:PrintDebug("Scoreboard Data (Simplified Format):");
+    TWArena:PrintDebug("- Winner Team: " .. winner .. " (0=None, 1=Alliance, 2=Horde)");
+    TWArena:PrintDebug("- Player Count: " .. playerCount);
+    TWArena:PrintDebug("- Raw Player Data: '" .. playerData .. "'");
+    
+    -- Store the scoreboard data
+    TWArena.ScoreboardData = {
+        winner = winner,
+        status = 2, -- Assume in progress since status is removed
+        playerCount = playerCount,
+        timestamp = GetTime(),
+        players = {}
+    };
+    
+    if playerData ~= "" then
+        -- Parse simplified player data: name|bgTeam:name|bgTeam:...
+        local players = TWArena:SplitString(playerData, TWArena.ARRAY_DELIMITER);
+        
+        TWArena:PrintDebug("Found " .. table.getn(players) .. " player entries");
+        
+        for i = 1, table.getn(players) do
+            local playerInfo = TWArena:SplitString(players[i], TWArena.SUBFIELD_DELIMITER);
+            
+            if table.getn(playerInfo) >= 2 then
+                local player = {
+                    name = playerInfo[1],
+                    bgTeam = tonumber(playerInfo[2]) or 0,
+                    originalTeam = tonumber(playerInfo[2]) or 0, -- Same as bgTeam since we don't have original
+                    kills = 0, -- Not available in simplified format
+                    deaths = 0, -- Not available in simplified format
+                    honorKills = 0, -- Not available in simplified format
+                    bonusHonor = 0, -- Not available in simplified format
+                    isWinner = (tonumber(playerInfo[2]) or 0) == winner,
+                    isAlive = true -- Assume alive since we don't have this data
+                };
+                
+                table.insert(TWArena.ScoreboardData.players, player);
+                
+                TWArena:PrintDebug("Player " .. i .. ": " .. player.name .. 
+                    " (BG Team: " .. player.bgTeam .. 
+                    ", Winner: " .. (player.isWinner and "Yes" or "No") .. ")");
+            else
+                TWArena:PrintDebug("Player " .. i .. " has incomplete data: " .. players[i]);
+            end
+        end
+    end
+    
+    TWArena:Print("=== Arena Scoreboard (Simplified) ===");
+    TWArena:Print("Winner: " .. TWArena:GetTeamString(winner));
+    TWArena:Print("Players in arena: " .. playerCount);
+    TWArena:Print("Actual players found: " .. table.getn(TWArena.ScoreboardData.players));
+    
+    if table.getn(TWArena.ScoreboardData.players) > 0 then
+        TWArena:Print("--- Player List ---");
+        for i = 1, table.getn(TWArena.ScoreboardData.players) do
+            local player = TWArena.ScoreboardData.players[i];
+            local teamStr = TWArena:GetTeamString(player.bgTeam);
+            local winStr = player.isWinner and " (WINNER)" or "";
+            
+            TWArena:Print(string.format("%s [%s]%s", 
+                player.name, teamStr, winStr));
+        end
+    end
+    
+    -- Highlight the key debugging info
+    if playerCount ~= table.getn(TWArena.ScoreboardData.players) then
+        TWArena:PrintError("MISMATCH: Server reports " .. playerCount .. " players, but found " .. table.getn(TWArena.ScoreboardData.players) .. " in data!");
+    else
+        TWArena:PrintSuccess("Player count matches: " .. playerCount .. " players");
+    end
+    
+    -- Update scoreboard UI if visible
+    TWArena:UpdateScoreboardFrame();
+end
+
+function TWArena:GetStatusString(status)
+    if status == 0 then return "None";
+    elseif status == 1 then return "Waiting to Join";
+    elseif status == 2 then return "In Progress";
+    elseif status == 3 then return "Waiting to Leave";
+    else return "Unknown (" .. status .. ")";
+    end
+end
+
+function TWArena:GetTeamString(team)
+    if team == 0 then return "None";
+    elseif team == 1 then return "Alliance";
+    elseif team == 2 then return "Horde";
+    else return "Unknown (" .. team .. ")";
     end
 end
 
@@ -666,6 +791,22 @@ function TWArena:CreateMainFrame()
     refreshBtn:SetText("Refresh");
     refreshBtn:SetScript("OnClick", function() TWArena:RequestTeamInfo(); end);
     
+    -- Scoreboard button
+    local scoreboardBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate");
+    scoreboardBtn:SetWidth(80);
+    scoreboardBtn:SetHeight(20);
+    scoreboardBtn:SetPoint("LEFT", refreshBtn, "RIGHT", 5, 0);
+    scoreboardBtn:SetText("Scoreboard");
+    scoreboardBtn:SetScript("OnClick", function() TWArena:RequestScoreboard(); end);
+    
+    -- Leave Match button
+    local leaveBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate");
+    leaveBtn:SetWidth(80);
+    leaveBtn:SetHeight(20);
+    leaveBtn:SetPoint("LEFT", scoreboardBtn, "RIGHT", 5, 0);
+    leaveBtn:SetText("Leave Match");
+    leaveBtn:SetScript("OnClick", function() TWArena:LeaveArenaMatch(); end);
+    
     -- Team info scroll frame
     local scrollFrame = CreateFrame("ScrollFrame", "TWArenaScrollFrame", frame, "UIPanelScrollFrameTemplate");
     scrollFrame:SetPoint("TOPLEFT", frame, "TOPLEFT", 15, -75);
@@ -680,6 +821,195 @@ function TWArena:CreateMainFrame()
     TWArena.Frames.Main = frame;
     
     TWArena:Print("DEBUG: Main frame created");
+end
+
+function TWArena:CreateScoreboardFrame()
+    if TWArena.Frames.Scoreboard then
+        return;
+    end
+    
+    local frame = CreateFrame("Frame", "TWArenaScoreboardFrame", UIParent);
+    frame:SetFrameStrata("DIALOG");
+    frame:SetWidth(500);
+    frame:SetHeight(400);
+    frame:SetPoint("CENTER", UIParent, "CENTER", 200, 0);
+    frame:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true, tileSize = 32, edgeSize = 32,
+        insets = { left = 11, right = 12, top = 12, bottom = 11 }
+    });
+    frame:SetMovable(true);
+    frame:EnableMouse(true);
+    frame:RegisterForDrag("LeftButton");
+    frame:SetScript("OnDragStart", function() this:StartMoving(); end);
+    frame:SetScript("OnDragStop", function() this:StopMovingOrSizing(); end);
+    frame:Hide();
+    
+    -- Title
+    local title = frame:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge");
+    title:SetPoint("TOP", frame, "TOP", 0, -15);
+    title:SetText("Arena Scoreboard");
+    
+    -- Close button
+    local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton");
+    closeBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -5, -5);
+    
+    -- Refresh scoreboard button
+    local refreshBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate");
+    refreshBtn:SetWidth(100);
+    refreshBtn:SetHeight(20);
+    refreshBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 15, -45);
+    refreshBtn:SetText("Refresh");
+    refreshBtn:SetScript("OnClick", function() TWArena:RequestScoreboard(); end);
+    
+    -- Debug button
+    local debugBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate");
+    debugBtn:SetWidth(100);
+    debugBtn:SetHeight(20);
+    debugBtn:SetPoint("LEFT", refreshBtn, "RIGHT", 5, 0);
+    debugBtn:SetText("Debug Data");
+    debugBtn:SetScript("OnClick", function() TWArena:DebugScoreboardData(); end);
+    
+    -- Scoreboard scroll frame
+    local scrollFrame = CreateFrame("ScrollFrame", "TWArenaScoreboardScrollFrame", frame, "UIPanelScrollFrameTemplate");
+    scrollFrame:SetPoint("TOPLEFT", frame, "TOPLEFT", 15, -75);
+    scrollFrame:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -35, 15);
+    
+    local content = CreateFrame("Frame", nil, scrollFrame);
+    content:SetWidth(450);
+    content:SetHeight(300);
+    scrollFrame:SetScrollChild(content);
+    
+    frame.content = content;
+    TWArena.Frames.Scoreboard = frame;
+    
+    TWArena:Print("DEBUG: Scoreboard frame created");
+end
+
+function TWArena:UpdateScoreboardFrame()
+    TWArena:CreateScoreboardFrame();
+    
+    local content = TWArena.Frames.Scoreboard.content;
+    
+    -- Clear existing children
+    local children = { content:GetChildren() };
+    for i = 1, table.getn(children) do
+        children[i]:Hide();
+        children[i]:SetParent(nil);
+    end
+    
+    if not TWArena.ScoreboardData or not TWArena.ScoreboardData.timestamp then
+        local noData = content:CreateFontString(nil, "ARTWORK", "GameFontNormal");
+        noData:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0);
+        noData:SetText("No scoreboard data available. Request scoreboard first.");
+        return;
+    end
+    
+    local yOffset = 0;
+    
+    -- Match info
+    local matchInfo = content:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge");
+    matchInfo:SetPoint("TOPLEFT", content, "TOPLEFT", 0, yOffset);
+    matchInfo:SetText("Match Status: " .. TWArena:GetStatusString(TWArena.ScoreboardData.status));
+    yOffset = yOffset - 20;
+    
+    local winnerInfo = content:CreateFontString(nil, "ARTWORK", "GameFontNormal");
+    winnerInfo:SetPoint("TOPLEFT", content, "TOPLEFT", 0, yOffset);
+    winnerInfo:SetText("Winner: " .. TWArena:GetTeamString(TWArena.ScoreboardData.winner));
+    yOffset = yOffset - 15;
+    
+    local playerCount = content:CreateFontString(nil, "ARTWORK", "GameFontNormal");
+    playerCount:SetPoint("TOPLEFT", content, "TOPLEFT", 0, yOffset);
+    playerCount:SetText("Players in Arena: " .. TWArena.ScoreboardData.playerCount);
+    yOffset = yOffset - 25;
+    
+    -- Players header
+    if table.getn(TWArena.ScoreboardData.players) > 0 then
+        local playersHeader = content:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge");
+        playersHeader:SetPoint("TOPLEFT", content, "TOPLEFT", 0, yOffset);
+        playersHeader:SetText("--- Players ---");
+        yOffset = yOffset - 20;
+        
+        -- Column headers
+        local headers = content:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall");
+        headers:SetPoint("TOPLEFT", content, "TOPLEFT", 0, yOffset);
+        headers:SetText("Name                Team      K/D    Honor  Status");
+        yOffset = yOffset - 15;
+        
+        -- Player entries
+        for i = 1, table.getn(TWArena.ScoreboardData.players) do
+            local player = TWArena.ScoreboardData.players[i];
+            local teamStr = TWArena:GetTeamString(player.bgTeam);
+            local statusStr = player.isAlive and "Alive" or "Dead";
+            local winStr = player.isWinner and " (WIN)" or "";
+            
+            local playerEntry = content:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall");
+            playerEntry:SetPoint("TOPLEFT", content, "TOPLEFT", 0, yOffset);
+            
+            -- Format: Name (padded), Team (padded), K/D, Honor, Status
+            local line = string.format("%-16s %-8s %2d/%-2d %4d  %s%s", 
+                string.sub(player.name, 1, 15), -- Truncate long names
+                teamStr,
+                player.kills,
+                player.deaths,
+                player.honorKills,
+                statusStr,
+                winStr
+            );
+            
+            playerEntry:SetText(line);
+            
+            -- Color code based on team
+            if player.bgTeam == 1 then -- Alliance
+                playerEntry:SetTextColor(0.3, 0.3, 1.0); -- Blue
+            elseif player.bgTeam == 2 then -- Horde
+                playerEntry:SetTextColor(1.0, 0.3, 0.3); -- Red
+            else
+                playerEntry:SetTextColor(1.0, 1.0, 1.0); -- White
+            end
+            
+            yOffset = yOffset - 12;
+        end
+    end
+    
+    -- Timestamp
+    local timestamp = content:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall");
+    timestamp:SetPoint("TOPLEFT", content, "TOPLEFT", 0, yOffset - 10);
+    timestamp:SetText("Last updated: " .. date("%H:%M:%S", TWArena.ScoreboardData.timestamp));
+    timestamp:SetTextColor(0.7, 0.7, 0.7);
+end
+
+function TWArena:ToggleScoreboardFrame()
+    TWArena:CreateScoreboardFrame();
+    
+    if TWArena.Frames.Scoreboard:IsShown() then
+        TWArena.Frames.Scoreboard:Hide();
+    else
+        TWArena.Frames.Scoreboard:Show();
+        TWArena:UpdateScoreboardFrame();
+    end
+end
+
+function TWArena:DebugScoreboardData()
+    if not TWArena.ScoreboardData or not TWArena.ScoreboardData.timestamp then
+        TWArena:PrintError("No scoreboard data to debug!");
+        return;
+    end
+    
+    TWArena:PrintDebug("=== Raw Scoreboard Debug Data ===");
+    TWArena:PrintDebug("Winner: " .. tostring(TWArena.ScoreboardData.winner));
+    TWArena:PrintDebug("Status: " .. tostring(TWArena.ScoreboardData.status));
+    TWArena:PrintDebug("Player Count: " .. tostring(TWArena.ScoreboardData.playerCount));
+    TWArena:PrintDebug("Actual Players Found: " .. table.getn(TWArena.ScoreboardData.players));
+    TWArena:PrintDebug("Timestamp: " .. tostring(TWArena.ScoreboardData.timestamp));
+    
+    for i = 1, table.getn(TWArena.ScoreboardData.players) do
+        local p = TWArena.ScoreboardData.players[i];
+        TWArena:PrintDebug(string.format("Player %d: %s | BG:%d Orig:%d | K:%d D:%d H:%d | Win:%s Alive:%s",
+            i, p.name, p.bgTeam, p.originalTeam, p.kills, p.deaths, p.honorKills,
+            tostring(p.isWinner), tostring(p.isAlive)));
+    end
 end
 
 function TWArena:ShowInvitationDialog(teamName, arenaType, inviterName, teamId)
@@ -933,6 +1263,12 @@ SlashCmdList["ARENA"] = function(msg)
         end
     elseif command == "leavequeue" or command == "leaveq" then
         TWArena:LeaveQueue();
+    elseif command == "scoreboard" or command == "sb" then
+        TWArena:RequestScoreboard();
+    elseif command == "scoreboard-ui" or command == "sbui" then
+        TWArena:ToggleScoreboardFrame();
+    elseif command == "leavematch" or command == "lm" then
+        TWArena:LeaveArenaMatch();
     elseif command == "accept" then
         local arenaType = args[2];
         if arenaType then
@@ -973,6 +1309,9 @@ SlashCmdList["ARENA"] = function(msg)
         TWArena:Print("/arena leave <type> - Leave team");
         TWArena:Print("/arena queue <type> - Join arena queue");
         TWArena:Print("/arena leavequeue - Leave arena queue");
+        TWArena:Print("/arena scoreboard - Request arena scoreboard");
+        TWArena:Print("/arena scoreboard-ui - Show/hide scoreboard window");
+        TWArena:Print("/arena leavematch - Leave current arena match");
         TWArena:Print("Arena types: 2v2, 3v3, 5v5");
     else
         TWArena:PrintError("Unknown command. Type /arena help for help.");
@@ -1001,6 +1340,17 @@ SlashCmdList["ARENADATA"] = function()
     if inviteCount == 0 then
         TWArena:Print("No pending invitations!");
     end
+    
+    TWArena:Print("=== Scoreboard Data ===");
+    if TWArena.ScoreboardData and TWArena.ScoreboardData.timestamp then
+        TWArena:Print("Status: " .. TWArena:GetStatusString(TWArena.ScoreboardData.status));
+        TWArena:Print("Winner: " .. TWArena:GetTeamString(TWArena.ScoreboardData.winner));
+        TWArena:Print("Player Count: " .. TWArena.ScoreboardData.playerCount);
+        TWArena:Print("Players Found: " .. table.getn(TWArena.ScoreboardData.players));
+        TWArena:Print("Last Updated: " .. date("%H:%M:%S", TWArena.ScoreboardData.timestamp));
+    else
+        TWArena:Print("No scoreboard data available!");
+    end
 end
 
 SLASH_ARENAUPDATE1 = "/arenaupdate";
@@ -1021,4 +1371,40 @@ SlashCmdList["ARENAINVITE"] = function(msg)
     else
         TWArena:Print("Usage: /arenainvite <teamName> <arenaType> <inviterName> <teamId>");
     end
+end
+
+SLASH_ARENASCOREBOARD1 = "/arenascoreboard";
+SlashCmdList["ARENASCOREBOARD"] = function()
+    TWArena:RequestScoreboard();
+end
+
+SLASH_ARENASCOREBOARDUI1 = "/arenascoreboardui";
+SlashCmdList["ARENASCOREBOARDUI"] = function()
+    TWArena:ToggleScoreboardFrame();
+end
+
+SLASH_ARENASCOREBOARDDEBUG1 = "/arenascoreboarddebug";
+SlashCmdList["ARENASCOREBOARDDEBUG"] = function()
+    TWArena:DebugScoreboardData();
+end
+
+SLASH_ARENALEAVEMATCH1 = "/arenaleavematch";
+SlashCmdList["ARENALEAVEMATCH"] = function()
+    TWArena:LeaveArenaMatch();
+end
+
+-- Simulate scoreboard data for testing
+SLASH_ARENASIMSCOREBOARD1 = "/arenasimscoreboard";
+SlashCmdList["ARENASIMSCOREBOARD"] = function(msg)
+    -- Simulate a scoreboard message for testing
+    local testData = msg;
+    if testData == "" then
+        -- Default test data: winner;status;playerCount;playerData
+        -- Format: Player1|1|1|3|1|2|150|1|1:Player2|1|1|1|2|1|100|1|0:Player3|2|2|2|1|3|120|0|1:Player4|2|2|0|3|0|80|0|0
+        testData = "1;2;4;Player1|1|1|3|1|2|150|1|1:Player2|1|1|1|2|1|100|1|0:Player3|2|2|2|1|3|120|0|1:Player4|2|2|0|3|0|80|0|0";
+    end
+    
+    local fullMessage = "S2C_SCOREBOARD;" .. testData;
+    TWArena:Print("Simulating scoreboard data: " .. fullMessage);
+    TWArena:HandleServerMessage(fullMessage);
 end
